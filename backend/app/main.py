@@ -6,8 +6,11 @@ for automatic database initialization, and includes route modules.
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from app.database import init_db
+from app.routes.chatbots import router as chatbots_router
 from app.routes.flows import router as flows_router
+from app.routes.node_definitions import router as node_definitions_router
 
 
 @asynccontextmanager
@@ -31,8 +34,24 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Configure CORS for local development with the Vite frontend
+origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Include routers
+app.include_router(chatbots_router)
 app.include_router(flows_router)
+app.include_router(node_definitions_router)
 
 
 # Root endpoint: returns a welcome message confirming the server is running
