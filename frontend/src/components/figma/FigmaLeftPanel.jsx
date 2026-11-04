@@ -63,7 +63,13 @@ const FigmaLeftPanel = ({
     };
 
     filteredNodes.forEach((node) => {
-      const branch = node.data?.branch || (node.id === 'welcome' || node.type === 'start' ? 'welcome' : 'other');
+      const branch =
+        node.data?.branch ||
+        (node.id?.startsWith('eligible_')
+          ? 'eligible_programs'
+          : node.id === 'welcome' || node.type === 'start'
+          ? 'welcome'
+          : 'other');
       if (groups[branch]) {
         groups[branch].push(node);
       } else {

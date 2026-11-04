@@ -19,6 +19,11 @@ function getNodeDimensions(node) {
   let height = 120;
 
   switch (node.type) {
+    case 'landing_page':
+    case 'landing':
+      width = 300;
+      height = 110 + buttonCount * 36;
+      break;
     case 'start':
       width = 300;
       height = 90 + buttonCount * 36;
@@ -161,7 +166,7 @@ export function applyDagreLayout(nodes, edges, options = {}) {
  * Computes tree depth levels starting from root node (default: 'welcome' or 'start').
  * Used for scale/hierarchy collapsing (showing first 3 levels by default).
  */
-export function computeNodeDepths(nodes, edges, rootId = 'welcome') {
+export function computeNodeDepths(nodes, edges, rootId = 'landing_page') {
   const depthMap = new Map();
   const childrenMap = new Map();
 
@@ -178,7 +183,9 @@ export function computeNodeDepths(nodes, edges, rootId = 'welcome') {
   // Determine actual root ID
   const effectiveRoot = nodes.find((n) => n.id === rootId)
     ? rootId
-    : nodes.find((n) => n.type === 'start')?.id || nodes[0]?.id;
+    : nodes.find((n) => n.id === 'welcome')?.id ||
+      nodes.find((n) => n.type === 'start' || n.type === 'landing_page')?.id ||
+      nodes[0]?.id;
 
   if (!effectiveRoot) return depthMap;
 

@@ -11,8 +11,28 @@ import { Handle, Position } from '@xyflow/react';
  */
 const FigmaDefaultNode = ({ id, data = {}, type, selected }) => {
   const nodeType = (type || data.nodeType || 'default').toLowerCase();
-  const label = data.label || data.name || id;
-  const message = data.message || data.text || data.description || '';
+  const label = data.label || data.name || data.title || id;
+  const program = data.program || '';
+  const topic = data.topic || '';
+  const chapter = data.chapter || '';
+  const explicitMessage = data.message || data.content || data.text || data.description || '';
+
+  // Compute effective display message
+  let displayMessage = explicitMessage;
+  if (!displayMessage) {
+    if (program || topic || chapter) {
+      const parts = [chapter, program, topic].filter(Boolean);
+      displayMessage = parts.join(' — ');
+    } else if (nodeType === 'landing_page' || nodeType === 'landing' || id === 'landing_page') {
+      displayMessage = data.subtitle || data.card_description || 'Your Trusted Healthcare Virtual Assistant';
+    } else if (Array.isArray(data.fields) && data.fields.length > 0) {
+      displayMessage = `Fields: ${data.fields
+        .map((f) => (typeof f === 'string' ? f : f.name || f.label || ''))
+        .filter(Boolean)
+        .join(', ')}`;
+    }
+  }
+
   const buttons = Array.isArray(data.buttons) ? data.buttons : [];
   const status = data.status || '';
   const isPending = status === 'PENDING';
@@ -23,6 +43,9 @@ const FigmaDefaultNode = ({ id, data = {}, type, selected }) => {
   // Type metadata
   const getTypeMeta = (t) => {
     switch (t) {
+      case 'landing_page':
+      case 'landing':
+        return { label: 'Landing Page', color: '#0284C7', bg: '#E0F2FE', border: '#BAE6FD' };
       case 'start':
         return { label: 'Start', color: '#10B981', bg: '#ECFDF5', border: '#A7F3D0' };
       case 'menu':
@@ -41,7 +64,7 @@ const FigmaDefaultNode = ({ id, data = {}, type, selected }) => {
   };
 
   const meta = getTypeMeta(nodeType);
-  const isStartNode = nodeType === 'start' || id === 'welcome';
+  const isStartNode = nodeType === 'start' || nodeType === 'landing_page' || nodeType === 'landing' || id === 'landing_page' || id === 'welcome';
   const isTerminalNode = nodeType === 'rag' || nodeType === 'answer';
 
   return (
@@ -136,15 +159,19 @@ const FigmaDefaultNode = ({ id, data = {}, type, selected }) => {
         {label}
       </div>
 
-      {/* Message preview if available */}
-      {message && (
-        <div className="figma-node-body" title={message}>
-          {message}
+      {/* Message preview or fallback */}
+      {displayMessage ? (
+        <div className="figma-node-body" title={displayMessage}>
+          {displayMessage}
         </div>
-      )}
+      ) : buttons.length === 0 ? (
+        <div className="figma-node-body" style={{ color: '#9CA3AF', fontStyle: 'italic' }}>
+          No message configured
+        </div>
+      ) : null}
 
       {/* Button Rows with individual right-side handles */}
-      {buttons.length > 0 ? (
+      {buttons.length > 0 && (
         <div
           className="figma-buttons-list"
           style={{
@@ -152,47 +179,53 @@ const FigmaDefaultNode = ({ id, data = {}, type, selected }) => {
             overflowY: buttons.length > 8 ? 'auto' : 'visible',
           }}
         >
-          {buttons.map((btn, idx) => (
-            <div key={btn.id || idx} className="figma-button-row">
-              <span
-                style={{
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                  maxWidth: '200px',
-                }}
-                title={btn.label}
-              >
-                {btn.label || `Option ${idx + 1}`}
-              </span>
+          {buttons.map((btn, idx) => {
+            const btnSlug = (btn.label || `opt_${idx}`).toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 24);
+            const btnHandleId = btn.id || `${id}__${btnSlug}__${idx}`;
 
-              {/* Right-side source handle for each button */}
-              <Handle
-                type="source"
-                position={Position.Right}
-                id={btn.id || `${id}__btn_${idx}`}
-                className="figma-btn-handle"
-              />
-            </div>
-          ))}
+            return (
+              <div key={btn.id || idx} className="figma-button-row">
+                <span
+                  style={{
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    maxWidth: '200px',
+                  }}
+                  title={btn.label}
+                >
+                  {btn.label || `Option ${idx + 1}`}
+                </span>
+
+                {/* Right-side source handle for each button */}
+                <Handle
+                  type="source"
+                  position={Position.Right}
+                  id={btnHandleId}
+                  className="figma-btn-handle"
+                />
+              </div>
+            );
+          })}
         </div>
-      ) : (
-        /* Outgoing handle on right if not terminal and no individual buttons */
-        !isTerminalNode && (
-          <Handle
-            type="source"
-            position={Position.Right}
-            style={{
-              right: -5,
-              top: 24,
-              width: 8,
-              height: 8,
-              background: '#0D99FF',
-              border: '1.5px solid #FFFFFF',
-              borderRadius: '50%',
-            }}
-          />
-        )
+      )}
+
+      {/* Fallback outgoing handle on right for edges without specific button sourceHandle */}
+      {!isTerminalNode && (
+        <Handle
+          type="source"
+          position={Position.Right}
+          style={{
+            right: -5,
+            top: buttons.length > 0 ? 24 : '50%',
+            transform: buttons.length > 0 ? 'none' : 'translateY(-50%)',
+            width: 8,
+            height: 8,
+            background: '#0D99FF',
+            border: '1.5px solid #FFFFFF',
+            borderRadius: '50%',
+          }}
+        />
       )}
     </div>
   );

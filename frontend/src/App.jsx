@@ -23,9 +23,27 @@ import {
   createFlow,
   updateFlow,
 } from './api/client';
+import { applyDagreLayout } from './utils/autoLayout';
 
 // Initial fallback nodes
 const initialNodes = [
+  {
+    id: 'landing_page',
+    type: 'landing_page',
+    data: {
+      label: 'Welcome to QMitra',
+      heading: 'Welcome to QMitra',
+      subtitle: 'Your Trusted Healthcare Virtual Assistant',
+      card_title: 'Ready to assist you!',
+      card_description: 'I can help you with healthcare information',
+      button_label: 'Get Started',
+      branch: 'welcome',
+      buttons: [
+        { id: 'landing_page__start__0', label: 'Get Started', next: 'welcome' },
+      ],
+    },
+    position: { x: 80, y: 160 },
+  },
   {
     id: 'welcome',
     type: 'start',
@@ -37,7 +55,7 @@ const initialNodes = [
         { id: 'welcome__explore__0', label: 'Explore Programs', next: 'programs_menu' },
       ],
     },
-    position: { x: 120, y: 160 },
+    position: { x: 440, y: 160 },
   },
   {
     id: 'programs_menu',
@@ -51,11 +69,19 @@ const initialNodes = [
         { id: 'programs_menu__shco__1', label: 'Small Healthcare Org (SHCO)', next: '' },
       ],
     },
-    position: { x: 460, y: 160 },
+    position: { x: 800, y: 160 },
   },
 ];
 
 const initialEdges = [
+  {
+    id: 'edge-landing-welcome',
+    source: 'landing_page',
+    sourceHandle: 'landing_page__start__0',
+    target: 'welcome',
+    type: 'smoothstep',
+    style: { stroke: '#A3A3A3', strokeWidth: 1.5 },
+  },
   {
     id: 'edge-welcome-programs',
     source: 'welcome',
@@ -69,6 +95,9 @@ const initialEdges = [
 // Defined OUTSIDE component: Base node types mapping
 const baseNodeTypes = {
   default: FigmaDefaultNode,
+  landing_page: FigmaDefaultNode,
+  landing: FigmaDefaultNode,
+  welcome_landing: FigmaDefaultNode,
   start: FigmaDefaultNode,
   menu: FigmaDefaultNode,
   rag: FigmaDefaultNode,
@@ -214,37 +243,203 @@ const FlowCanvas = () => {
         const rawNodes = Array.isArray(flow.flow_data.nodes) ? flow.flow_data.nodes : [];
         const rawEdges = Array.isArray(flow.flow_data.edges) ? flow.flow_data.edges : [];
 
-        // Normalize coordinates and ensure defaults
-        const sanitizedNodes = rawNodes.map((n, i) => ({
-          ...n,
-          id: String(n.id || `node_${i}`),
-          type: n.type || 'message',
-          data: n.data || {},
-          position: {
-            x: Number.isFinite(n.position?.x) ? Math.round(n.position.x) : 100 + (i % 5) * 80,
-            y: Number.isFinite(n.position?.y) ? Math.round(n.position.y) : 100 + (i % 7) * 70,
-          },
-        }));
+        // 1. Safely normalize nodes (support both legacy top-level fields and nested node.data)
+        const sanitizedNodes = rawNodes.map((n, i) => {
+          const id = String(n.id || `node_${i}`);
+          const nodeType = n.type || n.data?.nodeType || 'message';
 
-        const sanitizedEdges = rawEdges.map((e, i) => ({
-          ...e,
-          id: String(e.id || `edge_${i}`),
-          source: String(e.source),
-          target: String(e.target),
-          type: 'smoothstep',
-          style: { stroke: '#A3A3A3', strokeWidth: 1.5 },
-        }));
+          // Merge top-level legacy fields with nested n.data without overwriting valid data
+          const mergedData = {
+            ...n,
+            ...(n.data || {}),
+            nodeType,
+          };
+          delete mergedData.position; // Keep position strictly at node.position
 
-        setNodes(sanitizedNodes);
-        setEdges(sanitizedEdges);
+          // Ensure buttons have stable IDs for handle attachment
+          if (Array.isArray(mergedData.buttons)) {
+            mergedData.buttons = mergedData.buttons.map((btn, btnIdx) => {
+              const label = btn.label || `Option ${btnIdx + 1}`;
+              const slug = label.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 24);
+              return {
+                ...btn,
+                id: btn.id || `${id}__${slug}__${btnIdx}`,
+              };
+            });
+          }
+
+          return {
+            ...n,
+            id,
+            type: nodeType,
+            data: mergedData,
+            position: {
+              x: Number.isFinite(n.position?.x) ? Math.round(n.position.x) : NaN,
+              y: Number.isFinite(n.position?.y) ? Math.round(n.position.y) : NaN,
+            },
+          };
+        });
+
+        // Ensure the initial Landing Page exists as entry page for the flow
+        const hasLandingNode = sanitizedNodes.some(
+          (n) => n.type === 'landing_page' || n.type === 'landing' || n.id === 'landing_page'
+        );
+
+        if (!hasLandingNode && sanitizedNodes.length > 0) {
+          const firstConversationNode =
+            sanitizedNodes.find((n) => n.id === 'welcome') ||
+            sanitizedNodes.find((n) => n.type === 'start') ||
+            sanitizedNodes[0];
+
+          if (firstConversationNode) {
+            const landingNode = {
+              id: 'landing_page',
+              type: 'landing_page',
+              data: {
+                label: 'Welcome to QMitra',
+                heading: 'Welcome to QMitra',
+                subtitle: 'Your Trusted Healthcare Virtual Assistant',
+                card_title: 'Ready to assist you!',
+                card_description: 'I can help you with healthcare information',
+                button_label: 'Get Started',
+                branch: 'welcome',
+                buttons: [
+                  {
+                    id: 'landing_page__start__0',
+                    label: 'Get Started',
+                    next: firstConversationNode.id,
+                  },
+                ],
+              },
+              position: {
+                x: Number.isFinite(firstConversationNode.position?.x)
+                  ? firstConversationNode.position.x - 340
+                  : 80,
+                y: Number.isFinite(firstConversationNode.position?.y)
+                  ? firstConversationNode.position.y
+                  : 160,
+              },
+            };
+
+            sanitizedNodes.unshift(landingNode);
+
+            // Add connecting edge from landing_page to firstConversationNode
+            const landingEdgeExists = rawEdges.some(
+              (e) => String(e.source) === 'landing_page' && String(e.target) === String(firstConversationNode.id)
+            );
+            if (!landingEdgeExists) {
+              rawEdges.unshift({
+                id: `edge-landing-${firstConversationNode.id}`,
+                source: 'landing_page',
+                sourceHandle: 'landing_page__start__0',
+                target: firstConversationNode.id,
+                type: 'smoothstep',
+                style: { stroke: '#A3A3A3', strokeWidth: 1.5 },
+              });
+            }
+          }
+        }
+
+        const nodeIdsSet = new Set(sanitizedNodes.map((n) => n.id));
+        const nodeMap = new Map(sanitizedNodes.map((n) => [n.id, n]));
+
+        // 2. Safely normalize edges and resolve button handles
+        const validEdges = rawEdges
+          .filter((e) => e && e.source && e.target && nodeIdsSet.has(String(e.source)) && nodeIdsSet.has(String(e.target)))
+          .map((e, i) => {
+            const edgeId = String(e.id || `edge_${i}`);
+            const source = String(e.source);
+            const target = String(e.target);
+            let sourceHandle = e.sourceHandle || null;
+
+            // If edge lacks sourceHandle, attempt to match it to a button on the source node
+            if (!sourceHandle) {
+              const sourceNode = nodeMap.get(source);
+              if (sourceNode && Array.isArray(sourceNode.data?.buttons)) {
+                const matchedBtn = sourceNode.data.buttons.find(
+                  (btn) => String(btn.next) === target || String(btn.target) === target
+                );
+                if (matchedBtn) {
+                  sourceHandle = matchedBtn.id;
+                }
+              }
+            }
+
+            return {
+              ...e,
+              id: edgeId,
+              source,
+              target,
+              ...(sourceHandle ? { sourceHandle } : {}),
+              type: 'smoothstep',
+              style: { stroke: '#A3A3A3', strokeWidth: 1.5 },
+            };
+          });
+
+        // 3. Inspect positions: Detect missing, collapsed, or garbage coordinates
+        let hasInvalidPositions = false;
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+
+        for (const n of sanitizedNodes) {
+          if (!Number.isFinite(n.position?.x) || !Number.isFinite(n.position?.y)) {
+            hasInvalidPositions = true;
+            break;
+          }
+          // Check for extreme coordinate garbage (e.g. y < -3000 or y > 5000)
+          if (n.position.y < -3000 || n.position.y > 6000 || n.position.x < -2000 || n.position.x > 30000) {
+            hasInvalidPositions = true;
+            break;
+          }
+          minX = Math.min(minX, n.position.x);
+          maxX = Math.max(maxX, n.position.x);
+          minY = Math.min(minY, n.position.y);
+          maxY = Math.max(maxY, n.position.y);
+        }
+
+        // Check if all nodes collapsed into an overlapping cluster
+        if (!hasInvalidPositions && sanitizedNodes.length > 5 && maxX - minX < 200 && maxY - minY < 200) {
+          hasInvalidPositions = true;
+        }
+
+        let finalNodes = sanitizedNodes;
+        let finalEdges = validEdges;
+
+        // Apply Dagre hierarchical auto-layout if positions are missing or invalid
+        if (hasInvalidPositions && sanitizedNodes.length > 0) {
+          try {
+            const layoutResult = applyDagreLayout(sanitizedNodes, validEdges, {
+              rankdir: 'LR',
+              ranksep: 220,
+              nodesep: 40,
+            });
+            finalNodes = layoutResult.nodes;
+            // Keep edge styling consistent with Figma design (#A3A3A3)
+            finalEdges = layoutResult.edges.map((e) => ({
+              ...e,
+              style: { stroke: '#A3A3A3', strokeWidth: 1.5 },
+            }));
+          } catch (layoutErr) {
+            console.warn('[Figma UI] Auto-layout fallback error:', layoutErr);
+            finalNodes = sanitizedNodes.map((n, i) => ({
+              ...n,
+              position: {
+                x: Number.isFinite(n.position?.x) ? n.position.x : 100 + (i % 5) * 320,
+                y: Number.isFinite(n.position?.y) ? n.position.y : 100 + Math.floor(i / 5) * 160,
+              },
+            }));
+          }
+        }
+
+        setNodes(finalNodes);
+        setEdges(finalEdges);
         setSelectedNodeId(null);
         setErrorBanner(null);
 
         setTimeout(() => {
           if (typeof fitView === 'function') {
-            fitView({ padding: 0.2, duration: 400 });
+            fitView({ padding: 0.15, duration: 400 });
           }
-        }, 50);
+        }, 100);
       } catch (err) {
         console.warn(`[Figma UI] Failed to load flow ${flowId}:`, err);
         // Clear invalid active_flow_id from localStorage to prevent stuck reload loops
@@ -287,15 +482,20 @@ const FlowCanvas = () => {
         description: flowDescription,
         chatbot_id: loadedChatbotId || selectedChatbotId,
         flow_data: {
-          nodes: nodes.map((n) => ({
-            id: String(n.id),
-            type: n.type || 'message',
-            data: n.data || {},
-            position: {
-              x: Math.round(n.position?.x ?? 0),
-              y: Math.round(n.position?.y ?? 0),
-            },
-          })),
+          nodes: nodes.map((n) => {
+            const dataToSave = { ...(n.data || {}) };
+            delete dataToSave.position;
+
+            return {
+              id: String(n.id),
+              type: n.type || dataToSave.nodeType || 'message',
+              data: dataToSave,
+              position: {
+                x: Math.round(n.position?.x ?? 0),
+                y: Math.round(n.position?.y ?? 0),
+              },
+            };
+          }),
           edges: edges.map((e) => ({
             id: String(e.id),
             source: String(e.source),
@@ -381,7 +581,7 @@ const FlowCanvas = () => {
   const handleUpdateNode = useCallback(
     (nodeId, newData) => {
       setNodes((nds) =>
-        nds.map((n) => (n.id === nodeId ? { ...n, data: newData } : n))
+        nds.map((n) => (n.id === nodeId ? { ...n, data: { ...n.data, ...newData } } : n))
       );
     },
     [setNodes]
@@ -508,9 +708,12 @@ const FlowCanvas = () => {
           </ReactFlow>
         </main>
 
-        {/* Right Properties Panel (280px) */}
+        {/* Right Panel: Chatbot Preview & Properties */}
         <FigmaPropertiesPanel
           selectedNode={selectedNode}
+          nodes={nodes}
+          edges={edges}
+          onSelectNode={handleSelectNodeFromLayer}
           onUpdateNode={handleUpdateNode}
           onDeleteNode={handleDeleteNode}
         />
