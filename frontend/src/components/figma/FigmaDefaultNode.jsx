@@ -66,6 +66,11 @@ const FigmaDefaultNode = ({ id, data = {}, type, selected }) => {
   const meta = getTypeMeta(nodeType);
   const isStartNode = nodeType === 'start' || nodeType === 'landing_page' || nodeType === 'landing' || id === 'landing_page' || id === 'welcome';
   const isTerminalNode = nodeType === 'rag' || nodeType === 'answer';
+  const isEligibleAnswerNode =
+    nodeType === 'rag' ||
+    nodeType === 'answer' ||
+    nodeType === 'content' ||
+    nodeType === 'message';
 
   return (
     <div
@@ -226,6 +231,26 @@ const FigmaDefaultNode = ({ id, data = {}, type, selected }) => {
             borderRadius: '50%',
           }}
         />
+      )}
+      {/* Action button to open Content Editor for eligible answer nodes */}
+      {isEligibleAnswerNode && (
+        <div style={{ marginTop: '8px', paddingTop: '6px', borderTop: '1px solid #F1F5F9', display: 'flex', justifyContent: 'flex-end' }}>
+          <button
+            type="button"
+            className="figma-node-content-edit-btn"
+            onClick={(e) => {
+              e.stopPropagation();
+              window.dispatchEvent(
+                new CustomEvent('chatbot:open-content-editor', {
+                  detail: { nodeId: id },
+                })
+              );
+            }}
+            title="Edit rich answer blocks in PostgreSQL"
+          >
+            ✏️ Edit Content
+          </button>
+        </div>
       )}
     </div>
   );
