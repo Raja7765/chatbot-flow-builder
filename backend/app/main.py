@@ -18,6 +18,8 @@ from app.routes.flows import router as flows_router
 from app.routes.node_definitions import router as node_definitions_router
 from app.routes.node_answers import router as node_answers_router
 from app.routes.media import router as media_router
+from app.routes.llm import router as llm_router
+from app.services.llm_service import init_llm_service
 
 
 @asynccontextmanager
@@ -27,14 +29,27 @@ async def lifespan(app: FastAPI):
     Runs startup logic before the application begins accepting requests,
     and shutdown logic after the application stops.
     """
-    # Startup: Verify PostgreSQL connection, ensure upload directories, and ensure idempotent seed data
+    # Startup: Verify PostgreSQL connection, ensure upload directories, initialize DB seed data, and initialize LLM
     try:
+        print("🚀 Starting Chatbot Flow Builder...")
         with engine.connect() as conn:
             conn.execute(text("SELECT 1;"))
+        print("✅ PostgreSQL connected successfully")
+
         ensure_upload_dirs()
+        print("✅ Upload directories initialized")
+
         init_db()
+        print("✅ Database initialization completed")
+
+        try:
+            init_llm_service()
+            print("🤖 LLM initialized successfully")
+        except Exception as e:
+            print(f"[CRITICAL] Failed to initialize LLM during startup: {e}")
+            raise
     except Exception as e:
-        print(f"[CRITICAL] Failed to connect to PostgreSQL during startup: {e}")
+        print(f"[CRITICAL] Failed during application startup: {e}")
         raise
 
     yield
@@ -74,6 +89,7 @@ app.include_router(flows_router)
 app.include_router(node_definitions_router)
 app.include_router(node_answers_router)
 app.include_router(media_router)
+app.include_router(llm_router)
 
 
 # Root endpoint: returns a welcome message confirming the server is running
