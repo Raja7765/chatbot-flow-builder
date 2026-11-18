@@ -2,16 +2,17 @@
 API route handlers for Node Definitions.
 Manages listing, fetching, creating, updating, and safely deleting/deactivating
 both prebuilt and custom node definitions for the Chatbot Flow Builder.
+Uses SQLAlchemy 2.x and PostgreSQL.
 """
 
-import json
-import sqlite3
 from typing import List, Optional
 import uuid
-
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import case, func, select
+from sqlalchemy.orm import Session
 
-from app.database import get_db, get_utc_now_iso
+from app.database import get_db, get_utc_now
+from app.models import Flow, NodeDefinition
 from app.schemas import (
     NodeDefinitionCreate,
     NodeDefinitionDeleteResponse,
@@ -25,86 +26,46 @@ router = APIRouter(
 )
 
 
-def _row_to_response(row: sqlite3.Row) -> NodeDefinitionResponse:
-    """Helper to convert an SQLite node_definitions row into a NodeDefinitionResponse."""
-    def _parse_json(val: Optional[str]) -> dict:
-        if not val:
-            return {}
-        try:
-            parsed = json.loads(val)
-            return parsed if isinstance(parsed, dict) else {}
-        except Exception:
-            return {}
-
-    return NodeDefinitionResponse(
-        id=row["id"],
-        name=row["name"],
-        node_type=row["node_type"],
-        category=row["category"],
-        description=row["description"],
-        node_source=row["node_source"],
-        input_schema=_parse_json(row["input_schema"]),
-        output_schema=_parse_json(row["output_schema"]),
-        config_schema=_parse_json(row["config_schema"]),
-        executor_type=row["executor_type"],
-        executor_config=_parse_json(row["executor_config"]),
-        is_active=bool(row["is_active"]),
-        created_at=row["created_at"],
-        updated_at=row["updated_at"],
-    )
-
-
 @router.get("", response_model=List[NodeDefinitionResponse], status_code=status.HTTP_200_OK)
 def list_node_definitions(
     node_source: Optional[str] = Query(None, description="Filter by node source ('prebuilt' or 'custom')"),
     category: Optional[str] = Query(None, description="Filter by node category (e.g. 'AI', 'Logic')"),
     is_active: Optional[bool] = Query(None, description="Filter by active status (true/false)"),
-    conn: sqlite3.Connection = Depends(get_db),
+    db: Session = Depends(get_db),
 ) -> List[NodeDefinitionResponse]:
     """
     Retrieve all node definitions with optional filters for source, category, and active status.
     Ordered with prebuilt nodes first, then alphabetically by name.
     """
-    conditions = []
-    params = []
+    stmt = select(NodeDefinition)
 
     if node_source is not None:
         cleaned_source = node_source.strip().lower()
         if cleaned_source in ("prebuilt", "custom"):
-            conditions.append("node_source = ?")
-            params.append(cleaned_source)
+            stmt = stmt.where(NodeDefinition.node_source == cleaned_source)
 
     if category is not None:
         cleaned_category = category.strip()
         if cleaned_category:
-            conditions.append("LOWER(category) = LOWER(?)")
-            params.append(cleaned_category)
+            stmt = stmt.where(func.lower(NodeDefinition.category) == cleaned_category.lower())
 
     if is_active is not None:
-        conditions.append("is_active = ?")
-        params.append(1 if is_active else 0)
+        stmt = stmt.where(NodeDefinition.is_active == is_active)
 
-    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    # Prebuilt nodes first, then alphabetically by name
+    stmt = stmt.order_by(
+        case((NodeDefinition.node_source == "prebuilt", 0), else_=1),
+        NodeDefinition.name.asc(),
+    )
 
-    select_sql = f"""
-    SELECT id, name, node_type, category, description, node_source,
-           input_schema, output_schema, config_schema,
-           executor_type, executor_config, is_active, created_at, updated_at
-    FROM node_definitions
-    {where_clause}
-    ORDER BY CASE WHEN node_source = 'prebuilt' THEN 0 ELSE 1 END, name ASC;
-    """
-
-    cursor = conn.execute(select_sql, tuple(params))
-    rows = cursor.fetchall()
-    cursor.close()
-    return [_row_to_response(row) for row in rows]
+    nodes = db.execute(stmt).scalars().all()
+    return [NodeDefinitionResponse(**nd.to_dict()) for nd in nodes]
 
 
 @router.get("/{id}", response_model=NodeDefinitionResponse, status_code=status.HTTP_200_OK)
 def get_node_definition(
     id: str,
-    conn: sqlite3.Connection = Depends(get_db),
+    db: Session = Depends(get_db),
 ) -> NodeDefinitionResponse:
     """
     Retrieve a single node definition by its ID or stable node_type.
@@ -117,177 +78,124 @@ def get_node_definition(
             detail="Node definition ID cannot be empty.",
         )
 
-    select_sql = """
-    SELECT id, name, node_type, category, description, node_source,
-           input_schema, output_schema, config_schema,
-           executor_type, executor_config, is_active, created_at, updated_at
-    FROM node_definitions
-    WHERE id = ? OR node_type = ?;
-    """
-    cursor = conn.execute(select_sql, (cleaned_id, cleaned_id))
-    row = cursor.fetchone()
-    cursor.close()
+    stmt = select(NodeDefinition).where(
+        (NodeDefinition.id == cleaned_id) | (NodeDefinition.node_type == cleaned_id)
+    )
+    node_def = db.execute(stmt).scalar_one_or_none()
 
-    if row is None:
+    if node_def is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Node definition with identifier '{id}' was not found.",
         )
 
-    return _row_to_response(row)
+    return NodeDefinitionResponse(**node_def.to_dict())
 
 
 @router.post("", response_model=NodeDefinitionResponse, status_code=status.HTTP_201_CREATED)
 def create_custom_node_definition(
     payload: NodeDefinitionCreate,
-    conn: sqlite3.Connection = Depends(get_db),
+    db: Session = Depends(get_db),
 ) -> NodeDefinitionResponse:
     """
     Create a new custom node definition.
     Enforces node_source='custom' and prevents conflicting duplicate node types.
     """
     # 1. Check whether node_type already exists to prevent conflicting overwrites
-    check_sql = "SELECT id, name, node_source FROM node_definitions WHERE node_type = ?;"
-    cursor = conn.execute(check_sql, (payload.node_type,))
-    existing = cursor.fetchone()
-    cursor.close()
+    stmt = select(NodeDefinition).where(NodeDefinition.node_type == payload.node_type)
+    existing = db.execute(stmt).scalar_one_or_none()
 
     if existing is not None:
-        source_label = "Prebuilt" if existing["node_source"] == "prebuilt" else "Custom"
+        source_label = "Prebuilt" if existing.node_source == "prebuilt" else "Custom"
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
                 f"A {source_label} node definition with type '{payload.node_type}' already exists "
-                f"('{existing['name']}'). Please choose a different, unique node type identifier."
+                f"('{existing.name}'). Please choose a different, unique node type identifier."
             ),
         )
 
     # 2. Generate unique identifier and timestamps
     node_id = f"custom-{payload.node_type}-{uuid.uuid4().hex[:8]}"
-    now_iso = get_utc_now_iso()
+    now = get_utc_now()
 
-    # 3. Validate and serialize JSON schemas
-    input_schema_json = json.dumps(payload.input_schema or {})
-    output_schema_json = json.dumps(payload.output_schema or {})
-    config_schema_json = json.dumps(payload.config_schema or {})
-    executor_config_json = json.dumps(payload.executor_config or {})
-
-    insert_sql = """
-    INSERT INTO node_definitions (
-        id, name, node_type, category, description, node_source,
-        input_schema, output_schema, config_schema,
-        executor_type, executor_config, is_active, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, 'custom', ?, ?, ?, ?, ?, 1, ?, ?);
-    """
-
-    conn.execute(
-        insert_sql,
-        (
-            node_id,
-            payload.name,
-            payload.node_type,
-            payload.category,
-            payload.description or "",
-            input_schema_json,
-            output_schema_json,
-            config_schema_json,
-            payload.executor_type,
-            executor_config_json,
-            now_iso,
-            now_iso,
-        ),
+    new_node = NodeDefinition(
+        id=node_id,
+        name=payload.name,
+        node_type=payload.node_type,
+        category=payload.category,
+        description=payload.description or "",
+        node_source="custom",
+        input_schema=payload.input_schema or {},
+        output_schema=payload.output_schema or {},
+        config_schema=payload.config_schema or {},
+        executor_type=payload.executor_type,
+        executor_config=payload.executor_config or {},
+        is_active=True,
+        created_at=now,
+        updated_at=now,
     )
-    conn.commit()
+    db.add(new_node)
+    db.flush()
 
-    # 4. Fetch and return persisted record
-    return get_node_definition(node_id, conn)
+    return NodeDefinitionResponse(**new_node.to_dict())
 
 
 @router.put("/{id}", response_model=NodeDefinitionResponse, status_code=status.HTTP_200_OK)
 def update_custom_node_definition(
     id: str,
     payload: NodeDefinitionUpdate,
-    conn: sqlite3.Connection = Depends(get_db),
+    db: Session = Depends(get_db),
 ) -> NodeDefinitionResponse:
     """
     Update an existing custom node definition.
     Protected prebuilt node definitions cannot be modified.
     """
     cleaned_id = id.strip()
-    select_sql = "SELECT * FROM node_definitions WHERE id = ?;"
-    cursor = conn.execute(select_sql, (cleaned_id,))
-    row = cursor.fetchone()
-    cursor.close()
+    node_def = db.get(NodeDefinition, cleaned_id)
 
-    if row is None:
+    if node_def is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Node definition with id '{id}' was not found.",
         )
 
     # Protect prebuilt definitions from modification
-    if row["node_source"] == "prebuilt":
+    if node_def.node_source == "prebuilt":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Prebuilt node definitions are core system templates and cannot be modified.",
         )
 
-    now_iso = get_utc_now_iso()
+    if payload.name is not None:
+        node_def.name = payload.name
+    if payload.category is not None:
+        node_def.category = payload.category
+    if payload.description is not None:
+        node_def.description = payload.description
+    if payload.input_schema is not None:
+        node_def.input_schema = payload.input_schema
+    if payload.output_schema is not None:
+        node_def.output_schema = payload.output_schema
+    if payload.config_schema is not None:
+        node_def.config_schema = payload.config_schema
+    if payload.executor_type is not None:
+        node_def.executor_type = payload.executor_type
+    if payload.executor_config is not None:
+        node_def.executor_config = payload.executor_config
+    if payload.is_active is not None:
+        node_def.is_active = payload.is_active
 
-    # Determine updated values, preserving existing if omitted
-    new_name = payload.name if payload.name is not None else row["name"]
-    new_category = payload.category if payload.category is not None else row["category"]
-    new_description = payload.description if payload.description is not None else row["description"]
-    new_input_schema = (
-        json.dumps(payload.input_schema) if payload.input_schema is not None else row["input_schema"]
-    )
-    new_output_schema = (
-        json.dumps(payload.output_schema) if payload.output_schema is not None else row["output_schema"]
-    )
-    new_config_schema = (
-        json.dumps(payload.config_schema) if payload.config_schema is not None else row["config_schema"]
-    )
-    new_executor_type = payload.executor_type if payload.executor_type is not None else row["executor_type"]
-    new_executor_config = (
-        json.dumps(payload.executor_config) if payload.executor_config is not None else row["executor_config"]
-    )
-    new_is_active = (
-        (1 if payload.is_active else 0) if payload.is_active is not None else row["is_active"]
-    )
+    node_def.updated_at = get_utc_now()
+    db.flush()
 
-    update_sql = """
-    UPDATE node_definitions
-    SET name = ?, category = ?, description = ?,
-        input_schema = ?, output_schema = ?, config_schema = ?,
-        executor_type = ?, executor_config = ?, is_active = ?, updated_at = ?
-    WHERE id = ?;
-    """
-
-    conn.execute(
-        update_sql,
-        (
-            new_name,
-            new_category,
-            new_description,
-            new_input_schema,
-            new_output_schema,
-            new_config_schema,
-            new_executor_type,
-            new_executor_config,
-            new_is_active,
-            now_iso,
-            cleaned_id,
-        ),
-    )
-    conn.commit()
-
-    return get_node_definition(cleaned_id, conn)
+    return NodeDefinitionResponse(**node_def.to_dict())
 
 
 @router.delete("/{id}", response_model=NodeDefinitionDeleteResponse, status_code=status.HTTP_200_OK)
 def delete_or_deactivate_node_definition(
     id: str,
-    conn: sqlite3.Connection = Depends(get_db),
+    db: Session = Depends(get_db),
 ) -> NodeDefinitionDeleteResponse:
     """
     Safely delete or deactivate a custom node definition.
@@ -297,53 +205,43 @@ def delete_or_deactivate_node_definition(
     - If no flows reference this node type, it is permanently deleted.
     """
     cleaned_id = id.strip()
-    select_sql = "SELECT id, name, node_type, node_source FROM node_definitions WHERE id = ?;"
-    cursor = conn.execute(select_sql, (cleaned_id,))
-    row = cursor.fetchone()
-    cursor.close()
+    node_def = db.get(NodeDefinition, cleaned_id)
 
-    if row is None:
+    if node_def is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Node definition with id '{id}' was not found.",
         )
 
     # Protect prebuilt definitions
-    if row["node_source"] == "prebuilt":
+    if node_def.node_source == "prebuilt":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Prebuilt node definitions are core system templates and cannot be deleted.",
         )
 
-    target_type = row["node_type"]
+    target_type = node_def.node_type
 
     # Inspect all existing saved flows to check if any flow references this node type
-    flows_cursor = conn.execute("SELECT id, name, flow_data FROM flows;")
-    flow_rows = flows_cursor.fetchall()
-    flows_cursor.close()
+    all_flows = db.query(Flow).all()
     referencing_flows = []
 
-    for flow_row in flow_rows:
-        try:
-            flow_data = json.loads(flow_row["flow_data"])
-            flow_nodes = flow_data.get("nodes", [])
-            if any(
-                isinstance(n, dict) and n.get("type") == target_type
-                for n in flow_nodes
-            ):
-                referencing_flows.append(f"'{flow_row['name']}' ({flow_row['id'][:8]}...)")
-        except Exception:
-            continue
+    for flow in all_flows:
+        flow_data = flow.flow_data if isinstance(flow.flow_data, dict) else {}
+        flow_nodes = flow_data.get("nodes", [])
+        if any(
+            isinstance(n, dict) and n.get("type") == target_type
+            for n in flow_nodes
+        ):
+            referencing_flows.append(f"'{flow.name}' ({flow.id[:8]}...)")
 
-    now_iso = get_utc_now_iso()
+    now = get_utc_now()
 
     if referencing_flows:
         # Safe deactivation: do not break existing saved flows
-        conn.execute(
-            "UPDATE node_definitions SET is_active = 0, updated_at = ? WHERE id = ?;",
-            (now_iso, cleaned_id),
-        )
-        conn.commit()
+        node_def.is_active = False
+        node_def.updated_at = now
+        db.flush()
 
         flows_summary = ", ".join(referencing_flows[:3])
         if len(referencing_flows) > 3:
@@ -351,7 +249,7 @@ def delete_or_deactivate_node_definition(
 
         return NodeDefinitionDeleteResponse(
             message=(
-                f"Custom node '{row['name']}' is referenced by {len(referencing_flows)} flow(s) "
+                f"Custom node '{node_def.name}' is referenced by {len(referencing_flows)} flow(s) "
                 f"({flows_summary}). It has been safely deactivated instead of deleted to protect your flows."
             ),
             id=cleaned_id,
@@ -359,11 +257,12 @@ def delete_or_deactivate_node_definition(
         )
 
     # If no flows reference it, permanently delete
-    conn.execute("DELETE FROM node_definitions WHERE id = ?;", (cleaned_id,))
-    conn.commit()
+    node_name = node_def.name
+    db.delete(node_def)
+    db.flush()
 
     return NodeDefinitionDeleteResponse(
-        message=f"Custom node definition '{row['name']}' was successfully deleted.",
+        message=f"Custom node definition '{node_name}' was successfully deleted.",
         id=cleaned_id,
         deactivated=False,
     )

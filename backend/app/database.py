@@ -1,103 +1,65 @@
 """
-Database configuration and management module for the Chatbot Flow Builder.
-This module uses Python's built-in sqlite3 module to manage database connections,
-ensure safe connection cleanup, initialize the database directory, and create tables.
+Database configuration and session management module for Chatbot Flow Builder.
+Connects to PostgreSQL using SQLAlchemy 2.x and psycopg.
+Manages database sessions, connection pooling, and idempotent seed initialization.
 """
 
-from contextlib import contextmanager
 from datetime import datetime, timezone
-import json
+import os
 from pathlib import Path
-import sqlite3
-from typing import Generator, List, Optional, Union
+import sys
+from typing import Generator, List, Optional
 
-# Define paths relative to this file to ensure predictability across working directories:
-# __file__ -> backend/app/database.py
-# .parent -> backend/app
-# .parent.parent -> backend
+# 1. On Windows, ensure PostgreSQL bin directory is in PATH and DLL search path for libpq.dll
+pg_bin = r"C:\Program Files\PostgreSQL\18\bin"
+if os.path.exists(pg_bin):
+    if pg_bin not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = pg_bin + ";" + os.environ.get("PATH", "")
+    if hasattr(os, "add_dll_directory"):
+        try:
+            os.add_dll_directory(pg_bin)
+        except Exception:
+            pass
+
+# 2. Load DATABASE_URL from backend/.env
 BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / "data"
-DEFAULT_DB_PATH = DATA_DIR / "flows.db"
+from dotenv import load_dotenv
+load_dotenv(BASE_DIR / ".env")
 
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL environment variable is not set. Please check backend/.env.")
 
-def get_utc_now_iso() -> str:
-    """
-    Return the current UTC timestamp formatted as an ISO 8601 string.
-    Example: '2026-10-21T06:07:35.123456+00:00'
-    """
-    return datetime.now(timezone.utc).isoformat()
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session, sessionmaker
 
+from app.models import Base, Chatbot, Flow, NodeDefinition
 
-def ensure_db_directory(db_path: Union[Path, str]) -> Path:
-    """
-    Ensure the parent directory for the database file exists.
-    Creates parent directories if they do not exist.
+# SQLAlchemy Engine with connection pool recycling and health pre-ping
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    pool_size=10,
+    max_overflow=20,
+)
 
-    Args:
-        db_path: The file path to the SQLite database.
-
-    Returns:
-        Path: The resolved absolute Path object.
-    """
-    resolved_path = Path(db_path).resolve()
-    resolved_path.parent.mkdir(parents=True, exist_ok=True)
-    return resolved_path
-
-
-@contextmanager
-def get_db_connection(
-    db_path: Optional[Union[Path, str]] = None
-) -> Generator[sqlite3.Connection, None, None]:
-    """
-    Context manager providing a safely managed SQLite database connection.
-    Configured with check_same_thread=False and a 30s busy timeout to support
-    isolated per-request connection lifecycles across FastAPI's AnyIO thread pool.
-    Automatically commits on success, rolls back on error, and ensures the
-    connection is closed in all cases (including exceptions).
-
-    Args:
-        db_path: Optional path to the SQLite database file. Defaults to DEFAULT_DB_PATH.
-
-    Yields:
-        sqlite3.Connection: An open SQLite connection with Row factory enabled.
-    """
-    target_path = ensure_db_directory(db_path or DEFAULT_DB_PATH)
-    conn = sqlite3.connect(
-        target_path,
-        check_same_thread=False,
-        timeout=30.0,
-    )
-    # Enable dict-like column access by column name (e.g. row['name'])
-    conn.row_factory = sqlite3.Row
-    # Enable foreign keys support in SQLite
-    conn.execute("PRAGMA foreign_keys = ON;")
-    # Enable WAL mode for high concurrency between reader/writer threads
-    conn.execute("PRAGMA journal_mode = WAL;")
-    conn.execute("PRAGMA busy_timeout = 30000;")
-    conn.execute("PRAGMA synchronous = NORMAL;")
-
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        raise
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-
+# Session factory for generating isolated database sessions per request
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 DEFAULT_CHATBOT_ID = "default-chatbot"
 
-# Master registry of prebuilt node definitions seeded into the SQLite database.
-# Preserves existing flow node types ('start', 'message', 'router', 'employee_search', 'rag', 'response', 'tts')
-# and introduces standard prebuilt types ('llm', 'api_request', 'condition', 'database').
+
+def get_utc_now() -> datetime:
+    """Return timezone-aware current UTC datetime."""
+    return datetime.now(timezone.utc)
+
+
+def get_utc_now_iso() -> str:
+    """Return ISO 8601 formatted UTC timestamp string."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+# Master registry of prebuilt node definitions seeded into PostgreSQL.
 PREBUILT_NODE_DEFINITIONS = [
     {
         "id": "prebuilt-start",
@@ -312,199 +274,90 @@ PREBUILT_NODE_DEFINITIONS = [
 ]
 
 
-def seed_prebuilt_nodes(conn: sqlite3.Connection, now_iso: str) -> None:
-    """
-    Idempotently seeds prebuilt node definitions into the SQLite database.
-    If a definition does not exist, it is inserted.
-    If it already exists as prebuilt, its definition metadata is safely updated
-    while preserving its original creation timestamp and active state.
-    """
-    for node in PREBUILT_NODE_DEFINITIONS:
-        input_schema_json = json.dumps(node.get("input_schema", {}))
-        output_schema_json = json.dumps(node.get("output_schema", {}))
-        config_schema_json = json.dumps(node.get("config_schema", {}))
-        executor_config_json = json.dumps(node.get("executor_config", {}))
-
-        cursor = conn.execute(
-            "SELECT id, node_source FROM node_definitions WHERE node_type = ?;",
-            (node["node_type"],),
+def ensure_default_chatbot(db: Session) -> None:
+    """Ensure the default chatbot exists so unassigned flows have a valid parent."""
+    existing = db.get(Chatbot, DEFAULT_CHATBOT_ID)
+    if existing is None:
+        now = get_utc_now()
+        default_bot = Chatbot(
+            id=DEFAULT_CHATBOT_ID,
+            name="Default Chatbot",
+            description="Default system chatbot for flows",
+            status="active",
+            created_at=now,
+            updated_at=now,
         )
-        existing = cursor.fetchone()
-        cursor.close()
+        db.add(default_bot)
+        db.commit()
+
+
+def seed_prebuilt_nodes(db: Session) -> None:
+    """
+    Idempotently seeds prebuilt node definitions into PostgreSQL.
+    If a definition does not exist, it is inserted.
+    If it already exists as prebuilt, its metadata is updated without changing
+    its created_at timestamp or active state.
+    """
+    now = get_utc_now()
+    for node in PREBUILT_NODE_DEFINITIONS:
+        stmt = select(NodeDefinition).where(NodeDefinition.node_type == node["node_type"])
+        existing = db.execute(stmt).scalar_one_or_none()
 
         if existing is None:
-            conn.execute(
-                """
-                INSERT INTO node_definitions (
-                    id, name, node_type, category, description, node_source,
-                    input_schema, output_schema, config_schema,
-                    executor_type, executor_config, is_active, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?);
-                """,
-                (
-                    node["id"],
-                    node["name"],
-                    node["node_type"],
-                    node["category"],
-                    node.get("description", ""),
-                    "prebuilt",
-                    input_schema_json,
-                    output_schema_json,
-                    config_schema_json,
-                    node.get("executor_type"),
-                    executor_config_json,
-                    now_iso,
-                    now_iso,
-                ),
+            new_node = NodeDefinition(
+                id=node["id"],
+                name=node["name"],
+                node_type=node["node_type"],
+                category=node["category"],
+                description=node.get("description", ""),
+                node_source="prebuilt",
+                input_schema=node.get("input_schema", {}),
+                output_schema=node.get("output_schema", {}),
+                config_schema=node.get("config_schema", {}),
+                executor_type=node.get("executor_type"),
+                executor_config=node.get("executor_config", {}),
+                is_active=True,
+                created_at=now,
+                updated_at=now,
             )
-        elif existing["node_source"] == "prebuilt":
-            conn.execute(
-                """
-                UPDATE node_definitions
-                SET name = ?, category = ?, description = ?,
-                    input_schema = ?, output_schema = ?, config_schema = ?,
-                    executor_type = ?, executor_config = ?, updated_at = ?
-                WHERE id = ?;
-                """,
-                (
-                    node["name"],
-                    node["category"],
-                    node.get("description", ""),
-                    input_schema_json,
-                    output_schema_json,
-                    config_schema_json,
-                    node.get("executor_type"),
-                    executor_config_json,
-                    now_iso,
-                    existing["id"],
-                ),
-            )
+            db.add(new_node)
+        elif existing.node_source == "prebuilt":
+            existing.name = node["name"]
+            existing.category = node["category"]
+            existing.description = node.get("description", "")
+            existing.input_schema = node.get("input_schema", {})
+            existing.output_schema = node.get("output_schema", {})
+            existing.config_schema = node.get("config_schema", {})
+            existing.executor_type = node.get("executor_type")
+            existing.executor_config = node.get("executor_config", {})
+            existing.updated_at = now
+
+    db.commit()
 
 
-def init_db(db_path: Optional[Union[Path, str]] = None) -> None:
+def init_db() -> None:
     """
-    Initialize the SQLite database by creating the required tables and performing
-    safe, idempotent migrations.
-
-    Tables:
-    1. 'chatbots':
-       - id: TEXT PRIMARY KEY (unique identifier for each chatbot)
-       - name: TEXT NOT NULL (display name)
-       - description: TEXT (optional description)
-       - status: TEXT NOT NULL DEFAULT 'active' ('active' or 'inactive')
-       - created_at: TEXT NOT NULL (ISO 8601 UTC creation timestamp)
-       - updated_at: TEXT NOT NULL (ISO 8601 UTC last update timestamp)
-
-    2. 'flows':
-       - id: TEXT PRIMARY KEY (unique identifier for each flow)
-       - chatbot_id: TEXT (foreign key referencing chatbots.id)
-       - name: TEXT NOT NULL (display name of the flow)
-       - description: TEXT (optional description)
-       - flow_data: TEXT NOT NULL (JSON-serialized flow configuration)
-       - created_at: TEXT NOT NULL (ISO 8601 UTC creation timestamp)
-       - updated_at: TEXT NOT NULL (ISO 8601 UTC last update timestamp)
+    Idempotent startup database initialization.
+    Ensures default chatbot exists and prebuilt node definitions are seeded.
+    Schema creation itself is handled by Alembic migrations.
     """
-    create_chatbots_sql = """
-    CREATE TABLE IF NOT EXISTS chatbots (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        description TEXT,
-        status TEXT NOT NULL DEFAULT 'active',
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-    );
+    with SessionLocal() as db:
+        ensure_default_chatbot(db)
+        seed_prebuilt_nodes(db)
+
+
+def get_db() -> Generator[Session, None, None]:
     """
-
-    create_flows_sql = """
-    CREATE TABLE IF NOT EXISTS flows (
-        id TEXT PRIMARY KEY,
-        chatbot_id TEXT,
-        name TEXT NOT NULL,
-        description TEXT,
-        flow_data TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        FOREIGN KEY (chatbot_id) REFERENCES chatbots (id)
-    );
+    FastAPI dependency yielding an isolated SQLAlchemy Session per request.
+    Automatically commits on successful response, rolls back on exceptions,
+    and safely closes the session in all scenarios.
     """
-
-    create_node_definitions_sql = """
-    CREATE TABLE IF NOT EXISTS node_definitions (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        node_type TEXT NOT NULL UNIQUE,
-        category TEXT NOT NULL,
-        description TEXT,
-        node_source TEXT NOT NULL CHECK(node_source IN ('prebuilt', 'custom')),
-        input_schema TEXT NOT NULL DEFAULT '{}',
-        output_schema TEXT NOT NULL DEFAULT '{}',
-        config_schema TEXT NOT NULL DEFAULT '{}',
-        executor_type TEXT,
-        executor_config TEXT NOT NULL DEFAULT '{}',
-        is_active INTEGER NOT NULL DEFAULT 1,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-    );
-    """
-
-    create_node_index_sql = """
-    CREATE INDEX IF NOT EXISTS idx_node_definitions_filter
-    ON node_definitions (is_active, category, node_source);
-    """
-
-    now_iso = get_utc_now_iso()
-
-    with get_db_connection(db_path) as conn:
-        # 1. Create chatbots table first
-        conn.execute(create_chatbots_sql)
-
-        # 2. Create flows table if it does not exist
-        conn.execute(create_flows_sql)
-
-        # 3. Create node_definitions table and index
-        conn.execute(create_node_definitions_sql)
-        conn.execute(create_node_index_sql)
-
-        # 4. Safe repeatable migration: check if 'chatbot_id' column exists in 'flows'
-        cursor = conn.execute("PRAGMA table_info(flows);")
-        columns = [row["name"] for row in cursor.fetchall()]
-        cursor.close()
-
-        if "chatbot_id" not in columns:
-            conn.execute("ALTER TABLE flows ADD COLUMN chatbot_id TEXT REFERENCES chatbots(id);")
-
-        # 5. Ensure a default chatbot exists so legacy/unlinked flows are safely associated
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO chatbots (id, name, description, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?);
-            """,
-            (
-                DEFAULT_CHATBOT_ID,
-                "Default Chatbot",
-                "Default system chatbot for flows",
-                "active",
-                now_iso,
-                now_iso,
-            ),
-        )
-
-        # 6. Non-destructive backfill: assign existing flows without chatbot_id to default-chatbot
-        conn.execute(
-            "UPDATE flows SET chatbot_id = ? WHERE chatbot_id IS NULL OR chatbot_id = '';",
-            (DEFAULT_CHATBOT_ID,),
-        )
-
-        # 7. Seed prebuilt node definitions (idempotent, safe restart)
-        seed_prebuilt_nodes(conn, now_iso)
-
-
-def get_db() -> Generator[sqlite3.Connection, None, None]:
-    """
-    FastAPI dependency that yields a managed SQLite database connection.
-    Automatically commits upon request completion, rolls back on errors,
-    and safely closes the connection in all scenarios.
-    """
-    with get_db_connection() as conn:
-        yield conn
-
+    db = SessionLocal()
+    try:
+        yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()

@@ -6,7 +6,8 @@ Defines models for flow creation, updating, deletion, and responses.
 from enum import Enum
 import re
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+import uuid
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ChatbotStatus(str, Enum):
@@ -246,4 +247,173 @@ class NodeDefinitionDeleteResponse(BaseModel):
     message: str = Field(..., description="Status explanation message")
     id: str = Field(..., description="The ID of the deleted or deactivated node")
     deactivated: bool = Field(default=False, description="True if safely deactivated instead of deleted")
+
+
+class BlockType(str, Enum):
+    """Supported block types for node answers."""
+    TEXT = "text"
+    IMAGE = "image"
+    VIDEO = "video"
+    PDF = "pdf"
+
+
+class AnswerBlockCreate(BaseModel):
+    """
+    Schema for creating or updating an individual block of content within an answer.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    block_type: BlockType = Field(..., description="Type of block ('text', 'image', 'video', 'pdf')")
+    content: Optional[str] = Field(None, description="Textual content (required and non-empty for text blocks)")
+    media_id: Optional[str] = Field(None, description="UUID string of referenced media asset (required for image/video/pdf)")
+    position: int = Field(..., ge=1, description="1-based ordering position of the block")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Optional metadata object for custom styling or attributes")
+
+    @field_validator("media_id")
+    @classmethod
+    def validate_media_id(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None:
+            trimmed = value.strip()
+            if not trimmed:
+                return None
+            try:
+                uuid.UUID(trimmed)
+            except ValueError:
+                raise ValueError("media_id must be a valid UUID string.")
+            return trimmed
+        return None
+
+    @model_validator(mode="after")
+    def validate_block_fields(self) -> "AnswerBlockCreate":
+        if self.block_type == BlockType.TEXT:
+            if self.content is None or not self.content.strip():
+                raise ValueError("Content cannot be empty for text blocks.")
+            self.content = self.content.strip()
+        elif self.block_type in (BlockType.IMAGE, BlockType.VIDEO, BlockType.PDF):
+            if not self.media_id:
+                raise ValueError(f"media_id is required for '{self.block_type.value}' blocks.")
+        return self
+
+
+class AnswerBlockResponse(BaseModel):
+    """
+    Schema for returning an answer block.
+    """
+    model_config = ConfigDict(extra="allow")
+
+    id: str = Field(..., description="Unique UUID identifier for the answer block")
+    answer_id: str = Field(..., description="UUID identifier of the parent node answer")
+    block_type: str = Field(..., description="Block type: text, image, video, pdf")
+    content: Optional[str] = Field(None, description="Text content")
+    media_id: Optional[str] = Field(None, description="UUID string of referenced media asset")
+    position: int = Field(..., description="Ordering position")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Block metadata")
+    created_at: str = Field(..., description="ISO 8601 UTC creation timestamp")
+    updated_at: str = Field(..., description="ISO 8601 UTC last update timestamp")
+
+
+class NodeAnswerCreate(BaseModel):
+    """
+    Schema for creating a new node answer.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    language: str = Field(default="en", min_length=1, max_length=20, description="Language code (e.g. 'en', 'es', 'hi')")
+    blocks: List[AnswerBlockCreate] = Field(..., min_length=1, description="Non-empty list of answer blocks")
+
+    @field_validator("language")
+    @classmethod
+    def validate_language(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("Language cannot be empty or whitespace.")
+        return trimmed
+
+    @field_validator("blocks")
+    @classmethod
+    def validate_blocks_positions(cls, blocks: List[AnswerBlockCreate]) -> List[AnswerBlockCreate]:
+        positions = [b.position for b in blocks]
+        if len(positions) != len(set(positions)):
+            raise ValueError("Block positions must be distinct within an answer.")
+        return blocks
+
+
+class NodeAnswerUpdate(BaseModel):
+    """
+    Schema for updating an existing node answer and replacing its blocks.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    language: str = Field(default="en", min_length=1, max_length=20, description="Language code")
+    blocks: List[AnswerBlockCreate] = Field(..., min_length=1, description="Non-empty list of updated answer blocks")
+
+    @field_validator("language")
+    @classmethod
+    def validate_language(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("Language cannot be empty or whitespace.")
+        return trimmed
+
+    @field_validator("blocks")
+    @classmethod
+    def validate_blocks_positions(cls, blocks: List[AnswerBlockCreate]) -> List[AnswerBlockCreate]:
+        positions = [b.position for b in blocks]
+        if len(positions) != len(set(positions)):
+            raise ValueError("Block positions must be distinct within an answer.")
+        return blocks
+
+
+class NodeAnswerResponse(BaseModel):
+    """
+    Schema for returning full node answer details including ordered blocks.
+    """
+    model_config = ConfigDict(extra="allow")
+
+    id: str = Field(..., description="Unique UUID identifier for the node answer")
+    flow_id: str = Field(..., description="ID of the parent flow")
+    node_id: str = Field(..., description="Node ID inside the flow diagram")
+    language: str = Field(..., description="Language code")
+    blocks: List[AnswerBlockResponse] = Field(default_factory=list, description="Ordered answer blocks")
+    created_at: str = Field(..., description="ISO 8601 UTC creation timestamp")
+    updated_at: str = Field(..., description="ISO 8601 UTC last update timestamp")
+
+
+class NodeAnswerDeleteResponse(BaseModel):
+    """
+    Schema confirming deletion of a node answer.
+    """
+    message: str = Field(..., description="Success confirmation message")
+    id: str = Field(..., description="The UUID of the deleted answer")
+    flow_id: str = Field(..., description="Flow identifier")
+    node_id: str = Field(..., description="Node identifier")
+    language: str = Field(..., description="Language code")
+
+
+class MediaAssetResponse(BaseModel):
+    """
+    Schema for returning metadata about an uploaded media asset.
+    """
+    model_config = ConfigDict(extra="allow")
+
+    id: str = Field(..., description="Unique UUID identifier for the media asset")
+    file_name: str = Field(..., description="Original sanitized file name")
+    stored_name: str = Field(..., description="Unique stored file name on the server")
+    mime_type: str = Field(..., description="MIME content type")
+    media_type: str = Field(..., description="Media category ('image', 'document', 'video', etc.)")
+    storage_key: str = Field(..., description="Safe relative storage key on server")
+    file_size: int = Field(..., description="Size of the file in bytes")
+    checksum: Optional[str] = Field(None, description="SHA-256 checksum digest")
+    created_at: str = Field(..., description="ISO 8601 UTC creation timestamp")
+
+
+class MediaAssetDeleteResponse(BaseModel):
+    """
+    Schema for confirming media asset deletion.
+    """
+    message: str = Field(..., description="Confirmation message")
+    id: str = Field(..., description="Deleted media asset UUID")
+    file_name: str = Field(..., description="Original filename of the deleted asset")
+
+
 
