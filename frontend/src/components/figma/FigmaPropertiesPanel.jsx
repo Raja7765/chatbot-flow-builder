@@ -1,21 +1,47 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import ChatbotPreview from './ChatbotPreview';
+import AdminContentEditor from './AdminContentEditor';
+import AdminContentEditorModal from './AdminContentEditorModal';
+import NodeButtonsEditor from './NodeButtonsEditor';
 
 /**
  * FigmaPropertiesPanel Component
- * Right-side panel with tabs:
+ * Right-side panel with 3 tabs:
  * 1. "Chatbot Preview": Miniature rendition of NABH QMitra chatbot (nabh.corover.ai).
- * 2. "Properties": Clean node properties inspector adhering to Figma design principles.
+ * 2. "Content Editor": Rich multi-block answer editor persisted to PostgreSQL.
+ * 3. "Properties": Clean node properties inspector adhering to Figma design principles.
  */
 const FigmaPropertiesPanel = ({
   selectedNode,
   nodes = [],
   edges = [],
+  flowId,
   onSelectNode,
   onUpdateNode,
+  onUpdateEdges,
+  onUpdateNodeAndEdges,
   onDeleteNode,
+  onSaveFlow,
+  isSavingFlow = false,
 }) => {
-  const [activeTab, setActiveTab] = useState('preview'); // 'preview' | 'properties'
+  const [activeTab, setActiveTab] = useState('preview'); // 'preview' | 'content' | 'properties'
+  const [isEditorModalOpen, setIsEditorModalOpen] = useState(false);
+  const [previewRefreshKey, setPreviewRefreshKey] = useState(0);
+
+  // Listen to canvas node 'chatbot:open-content-editor' custom events
+  useEffect(() => {
+    const handleOpenEditor = (e) => {
+      const targetId = e.detail?.nodeId;
+      if (targetId && typeof onSelectNode === 'function') {
+        onSelectNode(targetId);
+      }
+      setActiveTab('content');
+    };
+    window.addEventListener('chatbot:open-content-editor', handleOpenEditor);
+    return () => {
+      window.removeEventListener('chatbot:open-content-editor', handleOpenEditor);
+    };
+  }, [onSelectNode]);
 
   const id = selectedNode?.id;
   const type = selectedNode?.type;
@@ -62,20 +88,39 @@ const FigmaPropertiesPanel = ({
     <aside className="figma-right-panel">
       {/* Right Panel Tabs Header */}
       <div className="panel-tabs-header right-panel-tabs">
+        {/* Tab 1: Preview */}
         <button
           type="button"
           className={`panel-tab-btn ${activeTab === 'preview' ? 'active' : ''}`}
           onClick={() => setActiveTab('preview')}
+          title="Miniature live chatbot preview"
         >
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
           </svg>
-          <span>Chatbot Preview</span>
+          <span>Preview</span>
         </button>
+
+        {/* Tab 2: Content Editor */}
+        <button
+          type="button"
+          className={`panel-tab-btn ${activeTab === 'content' ? 'active' : ''}`}
+          onClick={() => setActiveTab('content')}
+          title="Edit multi-block rich answer in PostgreSQL"
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 20h9"></path>
+            <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
+          </svg>
+          <span>Content</span>
+        </button>
+
+        {/* Tab 3: Properties */}
         <button
           type="button"
           className={`panel-tab-btn ${activeTab === 'properties' ? 'active' : ''}`}
           onClick={() => setActiveTab('properties')}
+          title="Inspect and edit node diagram properties"
         >
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <circle cx="12" cy="12" r="3"></circle>
@@ -91,12 +136,40 @@ const FigmaPropertiesPanel = ({
           selectedNode={selectedNode}
           nodes={nodes}
           edges={edges}
+          flowId={flowId}
           onSelectNode={onSelectNode}
           onSwitchToProperties={() => setActiveTab('properties')}
+          onSwitchToContentEditor={() => setActiveTab('content')}
+          refreshTrigger={previewRefreshKey}
         />
       )}
 
-      {/* Tab 2: Node Properties Inspector */}
+      {/* Tab 2: Admin Content Editor */}
+      {activeTab === 'content' && (
+        <>
+          {!selectedNode ? (
+            <div className="properties-empty-state">
+              <div className="properties-empty-icon">📝</div>
+              <div className="properties-empty-text">
+                Select a node on the canvas to edit its rich answer content in PostgreSQL.
+              </div>
+            </div>
+          ) : (
+            <AdminContentEditor
+              node={selectedNode}
+              flowId={flowId}
+              onClose={() => setActiveTab('preview')}
+              onAnswerSaved={() => {
+                setPreviewRefreshKey((k) => k + 1);
+              }}
+              onToggleModal={() => setIsEditorModalOpen(true)}
+              isModal={false}
+            />
+          )}
+        </>
+      )}
+
+      {/* Tab 3: Node Properties Inspector */}
       {activeTab === 'properties' && (
         <>
           {!selectedNode ? (
@@ -243,10 +316,38 @@ const FigmaPropertiesPanel = ({
                 ) : (
                   /* STANDARD CONVERSATION NODE FIELDS */
                   <>
+                    {/* Action to switch directly to Content Editor */}
+                    <div style={{ marginTop: '2px', marginBottom: '6px' }}>
+                      <button
+                        type="button"
+                        className="btn-figma-secondary"
+                        style={{
+                          width: '100%',
+                          justifyContent: 'center',
+                          gap: '6px',
+                          color: '#0284C7',
+                          borderColor: '#BAE6FD',
+                          background: '#F0F9FF',
+                          fontSize: '0.75rem',
+                          fontWeight: 600,
+                          padding: '7px 10px',
+                          cursor: 'pointer',
+                        }}
+                        onClick={() => setActiveTab('content')}
+                        title="Open multi-block content editor for this node"
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M12 20h9"></path>
+                          <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
+                        </svg>
+                        <span>Edit Content (PostgreSQL)</span>
+                      </button>
+                    </div>
+
                     {/* Message / Content */}
                     <div className="figma-form-group">
                       <label className="figma-label" htmlFor="prop-message">
-                        Message
+                        Message / Fallback Text
                       </label>
                       <textarea
                         id="prop-message"
@@ -292,27 +393,19 @@ const FigmaPropertiesPanel = ({
                   </div>
                 )}
 
-                {/* Buttons summary if present */}
-                {Array.isArray(data.buttons) && data.buttons.length > 0 && (
-                  <div className="figma-form-group">
-                    <span className="figma-label">Buttons ({data.buttons.length})</span>
-                    <div
-                      style={{
-                        fontSize: '0.75rem',
-                        color: 'var(--text-secondary)',
-                        background: 'var(--panel-hover)',
-                        padding: '6px 8px',
-                        borderRadius: 'var(--radius-sm)',
-                        border: '1px solid var(--border-color)',
-                        maxHeight: '80px',
-                        overflowY: 'auto',
-                        lineHeight: 1.4,
-                      }}
-                    >
-                      {data.buttons.map((b) => b.label || 'Option').join(', ')}
-                    </div>
-                  </div>
-                )}
+                {/* Interactive Buttons / Choices Editor */}
+                <div className="figma-form-group">
+                  <NodeButtonsEditor
+                    node={selectedNode}
+                    nodes={nodes}
+                    edges={edges}
+                    onUpdateNode={onUpdateNode}
+                    onUpdateEdges={onUpdateEdges}
+                    onUpdateNodeAndEdges={onUpdateNodeAndEdges}
+                    onSaveFlow={onSaveFlow}
+                    isSavingFlow={isSavingFlow}
+                  />
+                </div>
 
                 {/* Status */}
                 <div className="figma-form-group">
@@ -362,6 +455,19 @@ const FigmaPropertiesPanel = ({
             </>
           )}
         </>
+      )}
+
+      {/* Admin Content Editor Full Modal */}
+      {isEditorModalOpen && selectedNode && (
+        <AdminContentEditorModal
+          isOpen={isEditorModalOpen}
+          node={selectedNode}
+          flowId={flowId}
+          onClose={() => setIsEditorModalOpen(false)}
+          onAnswerSaved={() => {
+            setPreviewRefreshKey((k) => k + 1);
+          }}
+        />
       )}
     </aside>
   );

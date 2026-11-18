@@ -14,6 +14,10 @@ const FigmaTopBar = ({
   chatbots = [],
   selectedChatbotId,
   onSelectChatbot,
+  flows = [],
+  loadedFlowId = null,
+  onLoadFlow,
+  onCreateNewFlow,
   onImportClick,
   onSaveClick,
   onExportClick,
@@ -73,7 +77,7 @@ const FigmaTopBar = ({
         </div>
       </div>
 
-      {/* Center: Chatbot Selector */}
+      {/* Center: Chatbot & Flow Selectors */}
       <div className="topbar-center">
         <div className="topbar-chatbot-selector">
           <label htmlFor="topbar-chatbot-dropdown" style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 500 }}>
@@ -94,6 +98,32 @@ const FigmaTopBar = ({
                 </option>
               ))
             )}
+          </select>
+        </div>
+
+        {/* Flow Selector Dropdown */}
+        <div className="topbar-flow-selector" style={{ display: 'flex', alignItems: 'center', gap: '6px', marginLeft: '12px' }}>
+          <label htmlFor="topbar-flow-dropdown" style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 500 }}>
+            Flow:
+          </label>
+          <select
+            id="topbar-flow-dropdown"
+            className="chatbot-select-dropdown"
+            value={loadedFlowId || '__new__'}
+            onChange={(e) => {
+              if (e.target.value === '__new__') {
+                if (typeof onCreateNewFlow === 'function') onCreateNewFlow();
+              } else if (e.target.value) {
+                if (typeof onLoadFlow === 'function') onLoadFlow(e.target.value);
+              }
+            }}
+          >
+            {flows.map((f) => (
+              <option key={f.id} value={f.id}>
+                {f.name || 'Untitled Flow'}
+              </option>
+            ))}
+            <option value="__new__">+ New Flow...</option>
           </select>
         </div>
       </div>

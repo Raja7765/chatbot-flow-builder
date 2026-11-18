@@ -148,10 +148,17 @@ const FlowCanvas = () => {
 
   // Active Flow Identity
   const [loadedFlowId, setLoadedFlowId] = useState(null);
+  const loadedFlowIdRef = useRef(null);
   const [loadedChatbotId, setLoadedChatbotId] = useState(null);
+  const [flowMetadata, setFlowMetadata] = useState({});
   const [flowName, setFlowName] = useState('NABH QMitra Conversation Flow');
   const [flowDescription, setFlowDescription] = useState('Wireframe flow for NABH QMitra chatbot');
   const [isSaving, setIsSaving] = useState(false);
+
+  // Sync ref with state
+  useEffect(() => {
+    loadedFlowIdRef.current = loadedFlowId;
+  }, [loadedFlowId]);
 
   // Error Banner State
   const [errorBanner, setErrorBanner] = useState(null);
@@ -187,16 +194,19 @@ const FlowCanvas = () => {
   const loadChatbotFlows = useCallback(async (botId) => {
     if (!botId) {
       setChatbotFlows([]);
-      return;
+      return [];
     }
     setIsLoadingFlows(true);
     try {
       const flows = await fetchChatbotFlows(botId);
-      setChatbotFlows(Array.isArray(flows) ? flows : []);
+      const list = Array.isArray(flows) ? flows : [];
+      setChatbotFlows(list);
+      return list;
     } catch (err) {
       console.warn(`[Figma UI] Failed to fetch flows for chatbot ${botId}:`, err);
       setChatbotFlows([]);
       setErrorBanner(`Could not load saved flows for chatbot: ${err.message}`);
+      return [];
     } finally {
       setIsLoadingFlows(false);
     }
@@ -205,14 +215,6 @@ const FlowCanvas = () => {
   useEffect(() => {
     loadChatbots();
   }, [loadChatbots]);
-
-  useEffect(() => {
-    if (selectedChatbotId) {
-      loadChatbotFlows(selectedChatbotId);
-    } else {
-      setChatbotFlows([]);
-    }
-  }, [selectedChatbotId, loadChatbotFlows]);
 
   // Load saved flow from backend by ID with safe try/catch and error fallback
   const handleLoadFlow = useCallback(
@@ -225,9 +227,14 @@ const FlowCanvas = () => {
         }
 
         setLoadedFlowId(flow.id);
+        loadedFlowIdRef.current = flow.id;
         setLoadedChatbotId(flow.chatbot_id || selectedChatbotId);
         setFlowName(flow.name || 'Untitled Flow');
         setFlowDescription(flow.description || '');
+
+        // Preserve all existing non-node/non-edge metadata (such as start_node, layout, etc.)
+        const { nodes: rawNodesData, edges: rawEdgesData, ...extraMeta } = flow.flow_data || {};
+        setFlowMetadata(extraMeta || {});
 
         try {
           localStorage.setItem('active_flow_id', flow.id);
@@ -240,8 +247,8 @@ const FlowCanvas = () => {
           setSelectedChatbotId(flow.chatbot_id);
         }
 
-        const rawNodes = Array.isArray(flow.flow_data.nodes) ? flow.flow_data.nodes : [];
-        const rawEdges = Array.isArray(flow.flow_data.edges) ? flow.flow_data.edges : [];
+        const rawNodes = Array.isArray(rawNodesData) ? rawNodesData : [];
+        const rawEdges = Array.isArray(rawEdgesData) ? rawEdgesData : [];
 
         // 1. Safely normalize nodes (support both legacy top-level fields and nested node.data)
         const sanitizedNodes = rawNodes.map((n, i) => {
@@ -447,6 +454,8 @@ const FlowCanvas = () => {
           localStorage.removeItem('active_flow_id');
         } catch {}
         setLoadedFlowId(null);
+        loadedFlowIdRef.current = null;
+        setFlowMetadata({});
         setNodes([]);
         setEdges([]);
         setErrorBanner(`Failed to load flow (${flowId}): ${err.message}. Cleared cached flow session.`);
@@ -455,33 +464,56 @@ const FlowCanvas = () => {
     [selectedChatbotId, setNodes, setEdges, fitView]
   );
 
-  // Restore active flow from localStorage on mount safely
-  const hasRestoredFlowRef = useRef(false);
+  // When chatbot or its flows change, ensure an active flow is loaded if none is active
   useEffect(() => {
-    if (hasRestoredFlowRef.current) return;
-    try {
-      const storedFlowId = localStorage.getItem('active_flow_id');
-      if (storedFlowId) {
-        hasRestoredFlowRef.current = true;
-        handleLoadFlow(storedFlowId);
-      }
-    } catch (err) {
-      console.warn('[Figma UI] Stored flow restoration error:', err);
-      try {
-        localStorage.removeItem('active_flow_id');
-      } catch {}
-    }
-  }, [handleLoadFlow]);
+    if (!selectedChatbotId) return;
 
-  // Save active flow to SQLite backend
+    let isMounted = true;
+    (async () => {
+      const flows = await loadChatbotFlows(selectedChatbotId);
+      if (!isMounted) return;
+
+      const currentActiveId = loadedFlowIdRef.current;
+      const currentBelongsToBot = flows.some((f) => f.id === currentActiveId);
+
+      // If no flow is loaded or currently loaded flow does not belong to selected chatbot
+      if (!currentActiveId || !currentBelongsToBot) {
+        let flowToLoad = null;
+        try {
+          const stored = localStorage.getItem('active_flow_id');
+          if (stored && flows.some((f) => f.id === stored)) {
+            flowToLoad = stored;
+          }
+        } catch {}
+
+        if (!flowToLoad && flows.length > 0) {
+          flowToLoad = flows[0].id;
+        }
+
+        if (flowToLoad) {
+          handleLoadFlow(flowToLoad);
+        }
+      }
+    })();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [selectedChatbotId, loadChatbotFlows, handleLoadFlow]);
+
+  // Save active flow to PostgreSQL backend
   const handleSaveFlow = useCallback(async () => {
     setIsSaving(true);
     try {
+      const currentFlowId = loadedFlowIdRef.current || loadedFlowId;
+      const targetChatbotId = loadedChatbotId || selectedChatbotId;
+
       const payload = {
         name: flowName,
         description: flowDescription,
-        chatbot_id: loadedChatbotId || selectedChatbotId,
+        chatbot_id: targetChatbotId,
         flow_data: {
+          ...flowMetadata, // Preserves start_node, layout, and any existing metadata
           nodes: nodes.map((n) => {
             const dataToSave = { ...(n.data || {}) };
             delete dataToSave.position;
@@ -508,22 +540,36 @@ const FlowCanvas = () => {
       };
 
       let savedFlow;
-      if (loadedFlowId) {
-        savedFlow = await updateFlow(loadedFlowId, payload);
+      if (currentFlowId) {
+        console.log(`[FlowCanvas] Calling PUT /flows/${currentFlowId} for existing flow "${flowName}"`);
+        savedFlow = await updateFlow(currentFlowId, payload);
       } else {
+        console.log(`[FlowCanvas] Calling POST /flows for new flow "${flowName}"`);
         savedFlow = await createFlow(payload);
         setLoadedFlowId(savedFlow.id);
+        loadedFlowIdRef.current = savedFlow.id;
       }
 
       // Verification fetch
       const verified = await fetchFlowById(savedFlow.id);
       setLoadedFlowId(verified.id);
+      loadedFlowIdRef.current = verified.id;
+      setFlowName(verified.name || flowName);
+      setFlowDescription(verified.description || flowDescription);
+
+      const { nodes: _vn, edges: _ve, ...verifiedMeta } = verified.flow_data || {};
+      setFlowMetadata(verifiedMeta || {});
+
       try {
         localStorage.setItem('active_flow_id', verified.id);
+        if (verified.chatbot_id) {
+          localStorage.setItem('active_chatbot_id', verified.chatbot_id);
+        }
       } catch {}
 
-      if (selectedChatbotId) {
-        loadChatbotFlows(selectedChatbotId);
+      const refreshBotId = verified.chatbot_id || targetChatbotId;
+      if (refreshBotId) {
+        await loadChatbotFlows(refreshBotId);
       }
       setErrorBanner(null);
     } catch (err) {
@@ -532,7 +578,17 @@ const FlowCanvas = () => {
     } finally {
       setIsSaving(false);
     }
-  }, [flowName, flowDescription, loadedChatbotId, selectedChatbotId, loadedFlowId, nodes, edges, loadChatbotFlows]);
+  }, [
+    flowName,
+    flowDescription,
+    loadedChatbotId,
+    selectedChatbotId,
+    loadedFlowId,
+    flowMetadata,
+    nodes,
+    edges,
+    loadChatbotFlows,
+  ]);
 
   // Create new blank flow
   const handleCreateNewFlow = useCallback(() => {
@@ -540,6 +596,8 @@ const FlowCanvas = () => {
       localStorage.removeItem('active_flow_id');
     } catch {}
     setLoadedFlowId(null);
+    loadedFlowIdRef.current = null;
+    setFlowMetadata({});
     setFlowName('New Flow');
     setFlowDescription('');
     setNodes(initialNodes);
@@ -585,6 +643,20 @@ const FlowCanvas = () => {
       );
     },
     [setNodes]
+  );
+
+  const handleUpdateNodeAndEdges = useCallback(
+    (nodeId, newData, newEdges) => {
+      if (newData) {
+        setNodes((nds) =>
+          nds.map((n) => (n.id === nodeId ? { ...n, data: { ...n.data, ...newData } } : n))
+        );
+      }
+      if (newEdges) {
+        setEdges(newEdges);
+      }
+    },
+    [setNodes, setEdges]
   );
 
   const handleDeleteNode = useCallback(
@@ -635,6 +707,10 @@ const FlowCanvas = () => {
         chatbots={chatbots}
         selectedChatbotId={selectedChatbotId}
         onSelectChatbot={setSelectedChatbotId}
+        flows={chatbotFlows}
+        loadedFlowId={loadedFlowId}
+        onLoadFlow={handleLoadFlow}
+        onCreateNewFlow={handleCreateNewFlow}
         onImportClick={() => {}}
         onSaveClick={handleSaveFlow}
         onExportClick={() => {}}
@@ -713,9 +789,14 @@ const FlowCanvas = () => {
           selectedNode={selectedNode}
           nodes={nodes}
           edges={edges}
+          flowId={loadedFlowId}
           onSelectNode={handleSelectNodeFromLayer}
           onUpdateNode={handleUpdateNode}
+          onUpdateEdges={setEdges}
+          onUpdateNodeAndEdges={handleUpdateNodeAndEdges}
           onDeleteNode={handleDeleteNode}
+          onSaveFlow={handleSaveFlow}
+          isSavingFlow={isSaving}
         />
       </div>
     </div>
